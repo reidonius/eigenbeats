@@ -106,6 +106,10 @@ Summary:
            (begin (set! -state 'dub)
                   (set-canvas-background lightred)
                   (refresh))]
+          [(list #\z 'dub)
+           (send loop-player remove-last-recorded-event)]
+          [(list #\x 'dub)
+           (send loop-player toggle-quantization)]
           [(list #\backspace _)
            (begin (set! -state 'free)
                   (when loop-player
@@ -125,6 +129,47 @@ Summary:
 (define recording-instrument-controller%
   (recording-controller-mixin instrument-controller%))
 
+;; quantize divides the range from 0..length up into num-ticks parts
+;; bounded by (num-ticks + 1) equally-spaced "ticks", and determines which
+;; of these ticks is closest to t. The first and last tick are considered
+;; equivalent, so if it turns out to be closest to the last tick
+;; (at time length), we say it's at time 0
+;;
+;; Examples:
+;;  (quantize 11 100 10) -> 10
+;;  (quantize 11 100 5)  -> 20
+;;  (quantize 40 100 3)  -> 33
+;;
+(define (quantize t length num-ticks)
+  (let* ([tick-times (map (λ (k) (quotient (* k length) num-ticks)) (range (+ 1 num-ticks)))]
+         [distance-to-t (λ (tick-time) (abs (- tick-time t)))]
+         [nearest-tick (argmin distance-to-t tick-times)])
+    (if (eq? nearest-tick length)
+        0
+        nearest-tick)))
+
+;; Each event is assumed to be of the form
+;;  (list t ...)
+;; where t represents the time of the event (in milliseconds)
+;; It is assumed that eventlist contains events ordered by their t,
+;; and we want to insert event into eventlist in the correct place,
+;; to preserve this order
+(define (insert-to-eventlist event eventlist)
+  (define (helper eventlist-head event eventlist-tail)
+    (cond
+      [(empty? eventlist-tail) (append eventlist-head (list event))]
+      [(< (car event) (first (first eventlist-tail))) (append eventlist-head (list event) eventlist-tail)]
+      [else (helper (append eventlist-head (list (first eventlist-tail))) event (rest eventlist-tail))]))
+  (helper '() event eventlist))
+
+;; Each event is assumed to be of the form
+;;  (list t id ...)
+;; where t represends the time of the event (in milliseconds)
+;; and id represents an identifier for the event
+(define (remove-id-from-eventlist id eventlist)
+  (filter (λ (event) (not (eq? (second event) id))) eventlist))
+  
+
 ;; A loop-player% manages looped recording and playback of instrument events
 (define loop-player%
   (class object% (super-new)
@@ -132,9 +177,9 @@ Summary:
     (init frame-length)
     (define -current-frame-start-time initial-frame-start-time)
     (define -frame-length frame-length)
+    (define -quantize-new-events? #f)
+    (define -num-ticks 8)
     (define -recorded-events '())
-    (define (-display-event-times)
-      (printf "Recorded event times\n~a\n" (map (λ (event) (car event)) -recorded-events)))
     ;; Calling remainder here probably isn't necessary, because
     ;; -current-frame-start-time should be kept up to date by the -loop-thread below.
     ;; However, it's possible that this function gets called more than one full
@@ -144,43 +189,45 @@ Summary:
       (remainder (- time -current-frame-start-time) -frame-length))
     (define -loop-thread
       (thread (lambda ()
-                (begin
-                  (display "Loop thread started\n")
-                  ;; The main loop - traverses the list of recorded events, playing each one
-                  ;; at the appropriate time, and jumping back to the start of the list when
-                  ;; we get to a new frame
-                  (let play-pending ([pending -recorded-events])
-                    (let* ([time-within-current-frame (- (current-milliseconds) -current-frame-start-time)]
-                           [advance-frame? (> time-within-current-frame -frame-length)]
-                           [play-event-now? (λ (event) (< (car event) time-within-current-frame))])
-                      (if (empty? pending)
-                          (if advance-frame?
+                (printf "Loop-player: Loop thread started. Frame length: ~a\n" -frame-length)
+                ;; The main loop - traverses the list of recorded events, playing each one
+                ;; at the appropriate time, and jumping back to the start of the list when
+                ;; we get to a new frame
+                (let play-pending ([pending -recorded-events])
+                  (let* ([time-within-current-frame (- (current-milliseconds) -current-frame-start-time)]
+                         [advance-frame? (> time-within-current-frame -frame-length)]
+                         [play-event-now? (λ (event) (< (car event) time-within-current-frame))])
+                    (if (empty? pending)
+                        (if advance-frame?
+                            (begin
+                              (set! -current-frame-start-time (+ -current-frame-start-time -frame-length))
+                              (play-pending -recorded-events))
+                            (play-pending pending))
+                        (let ([next-event (first pending)])
+                          (if (play-event-now? next-event)
                               (begin
-                                (set! -current-frame-start-time (+ -current-frame-start-time -frame-length))
-                                (play-pending -recorded-events))
-                              (play-pending pending))
-                          (let ([next-event (car pending)])
-                            (if (play-event-now? next-event)
-                                (begin
-                                  (apply dynamic-send (cons (cadr next-event) (caddr next-event)))
-                                  (play-pending (cdr pending)))
-                                (play-pending pending))))))))))
+                                (apply dynamic-send (cons (third next-event) (fourth next-event)))
+                                (play-pending (cdr pending)))
+                              (play-pending pending)))))))))
     (define/public (record-event time instrument command)
-      ;; Helps to walk through the list of recorded events and find the proper
-      ;; place to insert the new one to preserve the time ordering
-      (define (helper head event tail)
-        (cond
-          [(empty? tail) (append head (list event))]
-          [(< (car event) (car (car tail))) (append head (list event) tail)]
-          [else (helper (append head (list (car tail))) event (cdr tail))]))
-      (begin
-        (let* ([new-event (list (-time-within-frame time) instrument command)]
-               [new-recorded-events (helper '() new-event -recorded-events)])
-          (set! -recorded-events new-recorded-events))
-        (-display-event-times)))
+      (let* ([event-time (if -quantize-new-events?
+                             (quantize (-time-within-frame time) -frame-length -num-ticks)
+                             (-time-within-frame time))]
+             [event-id (+ 1 (length -recorded-events))]
+             [new-event (list event-time event-id instrument command)]
+             [new-recorded-events (insert-to-eventlist new-event -recorded-events)])
+        (set! -recorded-events new-recorded-events)
+        (printf "Loop-player: Added event ~a at time ~a\n" event-id event-time)))
     (define/public (clear-events)
       (set! -recorded-events '()))
+    (define/public (remove-last-recorded-event)
+      (when (not (empty? -recorded-events))
+        (let ([id-to-remove (length -recorded-events)])
+          (set! -recorded-events (remove-id-from-eventlist id-to-remove -recorded-events))
+          (printf "Loop-player: Removed event ~a\n" id-to-remove))))
+    (define/public (toggle-quantization)
+      (set! -quantize-new-events? (not -quantize-new-events?))
+      (printf "Loop-player: Quantization ~a\n" (if -quantize-new-events? "ON" "OFF")))
     (define/public (stop-loop-thread)
-      (begin
-        (kill-thread -loop-thread)
-        (display "Loop thread killed\n")))))
+      (kill-thread -loop-thread)
+      (printf "Loop-player: Loop thread killed\n"))))

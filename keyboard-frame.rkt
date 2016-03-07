@@ -126,7 +126,14 @@
 (define drum-keymap
   #hash([#\a  . (kick)]
         [#\s  . (bassdrum)]
-        [#\d  . (bassdrum-synth)]))
+        [#\d  . (bassdrum-synth)]
+        [#\f  . (o-hi-hat)]
+        [#\g  . (c-hi-hat-1)]
+        [#\h  . (c-hi-hat-2)]
+        [#\j  . (clap-1)]
+        [#\k  . (clap-2)]
+        [#\l  . (crash-cymbal)]
+        [#\;  . (snare)]))
 
 (add-recording-instrument-controller (new $synth)
                                      note-keymap

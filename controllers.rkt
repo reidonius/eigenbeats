@@ -178,7 +178,7 @@ Summary:
     (define -current-frame-start-time initial-frame-start-time)
     (define -frame-length frame-length)
     (define -quantize-new-events? #f)
-    (define -num-ticks 8)
+    (define -num-ticks 16)
     (define -recorded-events '())
     ;; Calling remainder here probably isn't necessary, because
     ;; -current-frame-start-time should be kept up to date by the -loop-thread below.
@@ -201,14 +201,20 @@ Summary:
                         (if advance-frame?
                             (begin
                               (set! -current-frame-start-time (+ -current-frame-start-time -frame-length))
+                              (sleep .01)
                               (play-pending -recorded-events))
-                            (play-pending pending))
+                            (begin
+                              (sleep .01)
+                              (play-pending pending)))
                         (let ([next-event (first pending)])
                           (if (play-event-now? next-event)
                               (begin
                                 (apply dynamic-send (cons (third next-event) (fourth next-event)))
+                                (sleep .01)
                                 (play-pending (cdr pending)))
-                              (play-pending pending)))))))))
+                              (begin
+                                (sleep .01)
+                                (play-pending pending))))))))))
     (define/public (record-event time instrument command)
       (let* ([event-time (if -quantize-new-events?
                              (quantize (-time-within-frame time) -frame-length -num-ticks)
@@ -228,6 +234,8 @@ Summary:
     (define/public (toggle-quantization)
       (set! -quantize-new-events? (not -quantize-new-events?))
       (printf "Loop-player: Quantization ~a\n" (if -quantize-new-events? "ON" "OFF")))
+    (define/public (normalized-frame-position)
+      (/ (-time-within-frame (current-milliseconds)) (exact->inexact -frame-length)))
     (define/public (stop-loop-thread)
       (kill-thread -loop-thread)
       (printf "Loop-player: Loop thread killed\n"))))

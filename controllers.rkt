@@ -1,5 +1,7 @@
 #lang racket/gui
 
+(require "event.rkt")
+
 (provide controller%
          instrument-controller%
          recording-instrument-controller%)
@@ -80,7 +82,27 @@ Summary:
     ;;              and recorded notes are played back
     (define -state 'free)
     (define -loop-start-time #f)
-    (define loop-player #f)
+    (define -frame-length #f)
+    (define -quantize-new-events? #f)
+    (define -recorded-events '())
+    (define -num-ticks 16)
+    (define -loop-player #f)
+    (define (-record-event time instrument command quantize?)
+      (let* ([event-time (if quantize?
+                             (quantize (send -loop-player time-within-frame time) -frame-length -num-ticks)
+                             (send -loop-player time-within-frame time))]
+             [event-id (+ 1 (length -recorded-events))]
+             [new-event (list event-time event-id instrument command)]
+             [new-recorded-events (eventlist-insert -recorded-events new-event)])
+        (set! -recorded-events new-recorded-events)
+        (send -loop-player update-eventlist -recorded-events)
+        (printf "Recording-controller: Added event ~a at time ~a\n" event-id event-time)))
+    (define (-remove-last-recorded-event)
+      (when (not (empty? -recorded-events))
+        (let ([id-to-remove (length -recorded-events)])
+          (set! -recorded-events (eventlist-remove -recorded-events id-to-remove))
+          (send -loop-player update-eventlist -recorded-events)
+          (printf "Recording-controller: Removed event ~a\n" id-to-remove))))
     (define/override (on-char ke)
       (let ([k (send ke get-key-code)])
         (match (list k -state)
@@ -92,10 +114,10 @@ Summary:
                   (refresh))]
           [(list #\space 'timing)
            (begin (set! -state 'dub)
-                  (let ([loop-length (- (current-milliseconds) -loop-start-time)])
-                    (set! loop-player (new loop-player%
-                                           [initial-frame-start-time -loop-start-time]
-                                           [frame-length loop-length])))
+                  (set! -frame-length (- (current-milliseconds) -loop-start-time))
+                  (set! -loop-player (new loop-player%
+                                          [initial-frame-start-time -loop-start-time]
+                                          [frame-length -frame-length]))
                   (set-canvas-background lightred)
                   (refresh))]
           [(list #\space 'dub)
@@ -107,85 +129,47 @@ Summary:
                   (set-canvas-background lightred)
                   (refresh))]
           [(list #\z 'dub)
-           (send loop-player remove-last-recorded-event)]
+           (begin (-remove-last-recorded-event)
+                  (send -loop-player update-eventlist -recorded-events))]
           [(list #\x 'dub)
-           (send loop-player toggle-quantization)]
+           (begin (set! -quantize-new-events? (not -quantize-new-events?))
+                  (printf "Recording-controller: Quantization ~a\n" (if -quantize-new-events? "ON" "OFF")))]
           [(list #\backspace _)
            (begin (set! -state 'free)
-                  (when loop-player
-                    (send loop-player stop-loop-thread)
-                    (send loop-player clear-events))
+                  (when -loop-player
+                    (send -loop-player stop-loop-thread)
+                    (set! -recorded-events '())
+                    (send -loop-player update-eventlist -recorded-events))
                   (set-canvas-background lightgreen)
                   (refresh))]
           ;; Other key events are forwarded to the superclass, but we "record" them by
           ;;  * Asking the superclass if this is a meaningful key event (i.e. does it trigger an instrument event)
           ;;  * If so, saving the event in our list
           [(list _ _)
-           (begin (when (and (eq? -state 'dub)
+           (begin (super on-char ke)
+                  (when (and (eq? -state 'dub)
                              (list? (key->event k)))
-                    (send loop-player record-event (current-milliseconds) (get-instrument) (key->event k)))
-                  (super on-char ke))])))))
+                    (-record-event (current-milliseconds) (get-instrument) (key->event k) -quantize-new-events?)
+                    (send -loop-player update-eventlist -recorded-events)))])))))
 
 (define recording-instrument-controller%
   (recording-controller-mixin instrument-controller%))
 
-;; quantize divides the range from 0..length up into num-ticks parts
-;; bounded by (num-ticks + 1) equally-spaced "ticks", and determines which
-;; of these ticks is closest to t. The first and last tick are considered
-;; equivalent, so if it turns out to be closest to the last tick
-;; (at time length), we say it's at time 0
-;;
-;; Examples:
-;;  (quantize 11 100 10) -> 10
-;;  (quantize 11 100 5)  -> 20
-;;  (quantize 40 100 3)  -> 33
-;;
-(define (quantize t length num-ticks)
-  (let* ([tick-times (map (λ (k) (quotient (* k length) num-ticks)) (range (+ 1 num-ticks)))]
-         [distance-to-t (λ (tick-time) (abs (- tick-time t)))]
-         [nearest-tick (argmin distance-to-t tick-times)])
-    (if (eq? nearest-tick length)
-        0
-        nearest-tick)))
 
-;; Each event is assumed to be of the form
-;;  (list t ...)
-;; where t represents the time of the event (in milliseconds)
-;; It is assumed that eventlist contains events ordered by their t,
-;; and we want to insert event into eventlist in the correct place,
-;; to preserve this order
-(define (insert-to-eventlist event eventlist)
-  (define (helper eventlist-head event eventlist-tail)
-    (cond
-      [(empty? eventlist-tail) (append eventlist-head (list event))]
-      [(< (car event) (first (first eventlist-tail))) (append eventlist-head (list event) eventlist-tail)]
-      [else (helper (append eventlist-head (list (first eventlist-tail))) event (rest eventlist-tail))]))
-  (helper '() event eventlist))
-
-;; Each event is assumed to be of the form
-;;  (list t id ...)
-;; where t represends the time of the event (in milliseconds)
-;; and id represents an identifier for the event
-(define (remove-id-from-eventlist id eventlist)
-  (filter (λ (event) (not (eq? (second event) id))) eventlist))
-  
-
-;; A loop-player% manages looped recording and playback of instrument events
+;; A loop-player% manages looped playback of a list of instrument events
 (define loop-player%
   (class object% (super-new)
     (init initial-frame-start-time)
     (init frame-length)
     (define -current-frame-start-time initial-frame-start-time)
     (define -frame-length frame-length)
-    (define -quantize-new-events? #f)
-    (define -num-ticks 16)
     (define -recorded-events '())
     ;; Calling remainder here probably isn't necessary, because
     ;; -current-frame-start-time should be kept up to date by the -loop-thread below.
     ;; However, it's possible that this function gets called more than one full
     ;; frame-length after -current-frame-start-time, if -loop-thread has not had
     ;; the chance to advance to the next frame yet
-    (define (-time-within-frame time)      
+    (define/public (time-within-frame time)      
       (remainder (- time -current-frame-start-time) -frame-length))
     (define -loop-thread
       (thread (lambda ()
@@ -215,27 +199,10 @@ Summary:
                               (begin
                                 (sleep .01)
                                 (play-pending pending))))))))))
-    (define/public (record-event time instrument command)
-      (let* ([event-time (if -quantize-new-events?
-                             (quantize (-time-within-frame time) -frame-length -num-ticks)
-                             (-time-within-frame time))]
-             [event-id (+ 1 (length -recorded-events))]
-             [new-event (list event-time event-id instrument command)]
-             [new-recorded-events (insert-to-eventlist new-event -recorded-events)])
-        (set! -recorded-events new-recorded-events)
-        (printf "Loop-player: Added event ~a at time ~a\n" event-id event-time)))
-    (define/public (clear-events)
-      (set! -recorded-events '()))
-    (define/public (remove-last-recorded-event)
-      (when (not (empty? -recorded-events))
-        (let ([id-to-remove (length -recorded-events)])
-          (set! -recorded-events (remove-id-from-eventlist id-to-remove -recorded-events))
-          (printf "Loop-player: Removed event ~a\n" id-to-remove))))
-    (define/public (toggle-quantization)
-      (set! -quantize-new-events? (not -quantize-new-events?))
-      (printf "Loop-player: Quantization ~a\n" (if -quantize-new-events? "ON" "OFF")))
+    (define/public (update-eventlist new-eventlist)
+      (set! -recorded-events new-eventlist))
     (define/public (normalized-frame-position)
-      (/ (-time-within-frame (current-milliseconds)) (exact->inexact -frame-length)))
+      (/ (time-within-frame (current-milliseconds)) (exact->inexact -frame-length)))
     (define/public (stop-loop-thread)
       (kill-thread -loop-thread)
       (printf "Loop-player: Loop thread killed\n"))))

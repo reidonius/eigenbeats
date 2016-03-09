@@ -4,7 +4,7 @@
 
 (provide eventlist-insert
          eventlist-remove
-         quantize)
+         align)
 
 (struct event (time instrument command))
 
@@ -31,18 +31,18 @@
   (filter (λ (e) (not (eq? (second e) id))) el))
 
 
-;; quantize divides the range from 0..length up into num-ticks parts
+;; align divides the range from 0..length up into num-ticks parts
 ;; bounded by (num-ticks + 1) equally-spaced "ticks", and determines which
 ;; of these ticks is closest to t. The first and last tick are considered
 ;; equivalent, so if it turns out to be closest to the last tick
 ;; (at time length), we say it's at time 0
 ;;
 ;; Examples:
-;;  (quantize 11 100 10) -> 10
-;;  (quantize 11 100 5)  -> 20
-;;  (quantize 40 100 3)  -> 33
+;;  (align 11 100 10) -> 10
+;;  (align 11 100 5)  -> 20
+;;  (align 40 100 3)  -> 33
 ;;
-(define (quantize t length num-ticks)
+(define (align t length num-ticks)
   (let* ([tick-times (map (λ (k) (quotient (* k length) num-ticks)) (range (+ 1 num-ticks)))]
          [distance-to-t (λ (tick-time) (abs (- tick-time t)))]
          [nearest-tick (argmin distance-to-t tick-times)])

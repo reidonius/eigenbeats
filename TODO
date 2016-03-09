@@ -7,9 +7,4 @@
 
 2. "Pull" instruments - instruments which produce a fixed amount of sound to be queued, when asked
 
-3. Think about which properties of an instrument/playcanvas should be stored in the playcanvas,
-   and which should be stored in the instrument. This will become important when we want to actually
-   record/store things played on an instrument. The parameters/state must be kept somewhere
-   to make the sounds reproducible.
-
 |#

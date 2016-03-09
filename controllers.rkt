@@ -75,21 +75,18 @@ Summary:
              get-instrument)
     ;; The -state field takes one of the following values:
     ;;   'free      Notes are played normally, no recording
-    ;;   'timing    Notes are played normally,
     ;;   'dub       Notes are "recorded" and played back again at the
     ;;              same time through the loop
-    ;;   'playback  Notes are played normally (not recorded),
-    ;;              and recorded notes are played back
     (define -state 'free)
-    (define -loop-start-time #f)
-    (define -frame-length #f)
-    (define -quantize-new-events? #f)
+    (define -align-new-events? #t)
     (define -recorded-events '())
     (define -num-ticks 16)
-    (define -loop-player #f)
-    (define (-record-event time instrument command quantize?)
-      (let* ([event-time (if quantize?
-                             (quantize (send -loop-player time-within-frame time) -frame-length -num-ticks)
+    (define -loop-player the-loop-player)
+    (define (-record-event time instrument command align?)
+      (let* ([event-time (if align?
+                             (align (send -loop-player time-within-frame time)
+                                    (send -loop-player get-frame-length)
+                                    -num-ticks)
                              (send -loop-player time-within-frame time))]
              [event-id (+ 1 (length -recorded-events))]
              [new-event (list event-time event-id instrument command)]
@@ -107,49 +104,45 @@ Summary:
       (let ([k (send ke get-key-code)])
         (match (list k -state)
           ;; Some key events below trigger state transitions in this controller
-          [(list #\space 'free)
-           (begin (set! -state 'timing)
-                  (set! -loop-start-time (current-milliseconds))
-                  (set-canvas-background verylightred)
-                  (refresh))]
-          [(list #\space 'timing)
+          [(list #\\ 'free)
            (begin (set! -state 'dub)
-                  (set! -frame-length (- (current-milliseconds) -loop-start-time))
-                  (set! -loop-player (new loop-player%
-                                          [initial-frame-start-time -loop-start-time]
-                                          [frame-length -frame-length]))
                   (set-canvas-background lightred)
-                  (refresh))]
+                  (refresh)
+                  (printf "Recording-controller: Recording is ON\n"))]
+          [(list #\\ 'dub)
+           (begin (set! -state 'free)
+                  (set-canvas-background lightgreen)
+                  (refresh)
+                  (printf "Recording-controller: Recording is OFF\n"))]
+          ;; TODO Allow pausing/unpausing of looped playback
           [(list #\space 'dub)
-           (begin (set! -state 'playback)
-                  (set-canvas-background lightblue)
-                  (refresh))]
-          [(list #\space 'playback)
-           (begin (set! -state 'dub)
-                  (set-canvas-background lightred)
-                  (refresh))]
+           (if (send -loop-player is-playing?)
+               (begin (send -loop-player pause)
+                      (printf "Recording-controller: Paused playback\n"))
+               (begin (send -loop-player unpause)
+                      (printf "Recording-controller: Resumed playback\n")))]
+          ;; ..Others modify properties of the controller
+          [(list #\x _)
+           (begin (set! -align-new-events? (not -align-new-events?))
+                  (printf "Recording-controller: Alignment ~a\n" (if -align-new-events? "ON" "OFF")))]
+          [(list #\< _)
+           (begin (set! -num-ticks (sub1 -num-ticks))
+                  (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks))]
+          [(list #\> _)
+           (begin (set! -num-ticks (add1 -num-ticks))
+                  (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks))]
           [(list #\z 'dub)
            (begin (-remove-last-recorded-event)
                   (send -loop-player update-eventlist -recorded-events))]
-          [(list #\x 'dub)
-           (begin (set! -quantize-new-events? (not -quantize-new-events?))
-                  (printf "Recording-controller: Quantization ~a\n" (if -quantize-new-events? "ON" "OFF")))]
-          [(list #\backspace _)
-           (begin (set! -state 'free)
-                  (when -loop-player
-                    (send -loop-player stop-loop-thread)
-                    (set! -recorded-events '())
-                    (send -loop-player update-eventlist -recorded-events))
-                  (set-canvas-background lightgreen)
-                  (refresh))]
-          ;; Other key events are forwarded to the superclass, but we "record" them by
-          ;;  * Asking the superclass if this is a meaningful key event (i.e. does it trigger an instrument event)
-          ;;  * If so, saving the event in our list
+          ;; ..The rest are forwarded to the superclass, but if in the 'dub state,
+          ;;   we "record" them by
+          ;;    * Asking the superclass if this is a meaningful key event (i.e. does it trigger an instrument event)
+          ;;    * If so, saving the event in our list of recorded-events
           [(list _ _)
            (begin (super on-char ke)
                   (when (and (eq? -state 'dub)
                              (list? (key->event k)))
-                    (-record-event (current-milliseconds) (get-instrument) (key->event k) -quantize-new-events?)
+                    (-record-event (current-milliseconds) (get-instrument) (key->event k) -align-new-events?)
                     (send -loop-player update-eventlist -recorded-events)))])))))
 
 (define recording-instrument-controller%
@@ -163,21 +156,22 @@ Summary:
     (init frame-length)
     (define -current-frame-start-time initial-frame-start-time)
     (define -frame-length frame-length)
-    (define -recorded-events '())
+    (define -looped-events '())
+    (define -pause-time-within-frame #f)
     ;; Calling remainder here probably isn't necessary, because
-    ;; -current-frame-start-time should be kept up to date by the -loop-thread below.
+    ;; -current-frame-start-time should be kept up to date by the -playback-thread below.
     ;; However, it's possible that this function gets called more than one full
-    ;; frame-length after -current-frame-start-time, if -loop-thread has not had
+    ;; frame-length after -current-frame-start-time, if -playback-thread has not had
     ;; the chance to advance to the next frame yet
     (define/public (time-within-frame time)      
       (remainder (- time -current-frame-start-time) -frame-length))
-    (define -loop-thread
+    (define -playback-thread
       (thread (lambda ()
                 (printf "Loop-player: Loop thread started. Frame length: ~a\n" -frame-length)
-                ;; The main loop - traverses the list of recorded events, playing each one
+                ;; The main loop - traverses the list of looped events, playing each one
                 ;; at the appropriate time, and jumping back to the start of the list when
                 ;; we get to a new frame
-                (let play-pending ([pending -recorded-events])
+                (let play-pending ([pending -looped-events])
                   (let* ([time-within-current-frame (- (current-milliseconds) -current-frame-start-time)]
                          [advance-frame? (> time-within-current-frame -frame-length)]
                          [play-event-now? (λ (event) (< (car event) time-within-current-frame))])
@@ -186,7 +180,7 @@ Summary:
                             (begin
                               (set! -current-frame-start-time (+ -current-frame-start-time -frame-length))
                               (sleep .01)
-                              (play-pending -recorded-events))
+                              (play-pending -looped-events))
                             (begin
                               (sleep .01)
                               (play-pending pending)))
@@ -200,9 +194,25 @@ Summary:
                                 (sleep .01)
                                 (play-pending pending))))))))))
     (define/public (update-eventlist new-eventlist)
-      (set! -recorded-events new-eventlist))
+      (set! -looped-events new-eventlist))
     (define/public (normalized-frame-position)
       (/ (time-within-frame (current-milliseconds)) (exact->inexact -frame-length)))
-    (define/public (stop-loop-thread)
-      (kill-thread -loop-thread)
-      (printf "Loop-player: Loop thread killed\n"))))
+    (define/public (get-frame-length)
+      -frame-length)
+    (define/public (is-playing?)
+      (thread-running? -playback-thread))
+    (define/public (pause)
+      (thread-suspend -playback-thread)
+      (set! -pause-time-within-frame (time-within-frame (current-milliseconds)))
+      (set! -current-frame-start-time #f)
+      (printf "Loop-player: Paused\n"))
+    (define/public (unpause)
+      (set! -current-frame-start-time (- (current-milliseconds) -pause-time-within-frame))
+      (set! -pause-time-within-frame #f)
+      (thread-resume -playback-thread)
+      (printf "Loop-player: Unpaused\n"))))
+
+(define the-loop-player
+  (new loop-player%
+       [initial-frame-start-time (current-milliseconds)]
+       [frame-length 4800]))

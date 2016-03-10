@@ -49,14 +49,14 @@ An instrument-controller% extends controller% by imbuing it with
         (when (list? event-with-args)
           (apply dynamic-send (cons -instrument event-with-args)))))))
 
-#| recording-controller-mixin
+#| recording-instrument-controller%
 
 Usage:
-  (define my-recording-controller%
-    (recording-controller-mixin my-original-controller))
+  (define my-recording-instrument-controller
+    (new recording-instrument-controller%))
 
 Summary:
-  A mixin which extends a controller% by allowing recording and playback
+  A class which extends a controller% by allowing recording and playback
   of key events. It maintains an internal state (to capture whether we
   are recording, playing back, etc) and listens for a few key events which
   can manipulate that state, forwarding the remaining key events on to
@@ -67,16 +67,19 @@ Summary:
        to be a member of the 'timing state, since it's not needed for
        anything else (i.e it doesn't really belong as a member of this class)
 |#
-(define (recording-controller-mixin %)
-  (class % (super-new)
+(define recording-instrument-controller%
+  (class instrument-controller%
+    (init name)
     (inherit set-canvas-background
-             refresh
              key->event
-             get-instrument)
+             get-instrument
+             get-width
+             get-height)
     ;; The -state field takes one of the following values:
     ;;   'free      Notes are played normally, no recording
     ;;   'dub       Notes are "recorded" and played back again at the
     ;;              same time through the loop
+    (define -name name)
     (define -state 'free)
     (define -align-new-events? #t)
     (define -recorded-events '())
@@ -107,31 +110,27 @@ Summary:
           [(list #\\ 'free)
            (begin (set! -state 'dub)
                   (set-canvas-background lightred)
-                  (refresh)
                   (printf "Recording-controller: Recording is ON\n"))]
           [(list #\\ 'dub)
            (begin (set! -state 'free)
                   (set-canvas-background lightgreen)
-                  (refresh)
                   (printf "Recording-controller: Recording is OFF\n"))]
-          ;; TODO Allow pausing/unpausing of looped playback
-          [(list #\space 'dub)
+          [(list #\space _)
            (if (send -loop-player is-playing?)
-               (begin (send -loop-player pause)
-                      (printf "Recording-controller: Paused playback\n"))
-               (begin (send -loop-player unpause)
-                      (printf "Recording-controller: Resumed playback\n")))]
+               (send -loop-player pause)
+               (send -loop-player unpause))]
           ;; ..Others modify properties of the controller
           [(list #\x _)
            (begin (set! -align-new-events? (not -align-new-events?))
                   (printf "Recording-controller: Alignment ~a\n" (if -align-new-events? "ON" "OFF")))]
           [(list #\< _)
-           (begin (set! -num-ticks (sub1 -num-ticks))
-                  (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks))]
+           (begin (if (> -num-ticks 1)
+                      (set! -num-ticks (sub1 -num-ticks))
+                      (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks)))]
           [(list #\> _)
            (begin (set! -num-ticks (add1 -num-ticks))
                   (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks))]
-          [(list #\z 'dub)
+          [(list #\backspace 'dub)
            (begin (-remove-last-recorded-event)
                   (send -loop-player update-eventlist -recorded-events))]
           ;; ..The rest are forwarded to the superclass, but if in the 'dub state,
@@ -143,10 +142,39 @@ Summary:
                   (when (and (eq? -state 'dub)
                              (list? (key->event k)))
                     (-record-event (current-milliseconds) (get-instrument) (key->event k) -align-new-events?)
-                    (send -loop-player update-eventlist -recorded-events)))])))))
-
-(define recording-instrument-controller%
-  (recording-controller-mixin instrument-controller%))
+                    (send -loop-player update-eventlist -recorded-events)))])))
+    (define/override (on-focus on?)
+      (if on?
+          (if (eq? -state 'dub)
+              (set-canvas-background lightred)
+              (set-canvas-background lightgreen))
+          (set-canvas-background white)))
+    ;; TODO make this more efficient - instead of redrawing everything every time,
+    ;; maybe only re-draw the sweeping line every time, and pre-render everything else
+    ;; on a differt buffer, only re-drawing it when it needs to?
+    (define/private (my-paint-callback canvas dc)
+      ;; Draw the name
+      (send dc draw-text -name 0 0)
+      ;; Draw the "ticks"
+      (let ([tick-x-positions (map (λ (k) (/ (* k (get-width)) -num-ticks)) (range (add1 -num-ticks)))]
+            [y-top (* (get-height) 1/4)]
+            [y-bot (* (get-height) 3/4)])
+        (send dc set-pen "black" 1 'solid)
+        (for ([x tick-x-positions])
+          (send dc draw-line x y-top x y-bot)))
+      ;; Draw the recorded events
+      (let* ([get-event-x-position (λ (event) (/ (* (get-width) (first event)) (send -loop-player get-frame-length)))]
+             [event-x-positions (map get-event-x-position -recorded-events)])
+        (send dc set-brush "blue" 'solid)
+        (send dc set-pen "white" 1 'transparent)
+        (for ([x event-x-positions])
+          (send dc draw-ellipse (- x 4) (- (/ (get-height) 2) 4) 8 8)))
+      ;; Draw the sweeping progress line
+      (let ([line-x-position (* (get-width) (send -loop-player normalized-frame-position))])
+        (send dc set-pen "red" 2 'solid)
+        (send dc draw-line line-x-position 0 line-x-position (get-height))))
+    (super-new
+     (paint-callback (λ (canvas dc) (my-paint-callback canvas dc))))))
 
 
 ;; A loop-player% manages looped playback of a list of instrument events
@@ -158,13 +186,16 @@ Summary:
     (define -frame-length frame-length)
     (define -looped-events '())
     (define -pause-time-within-frame #f)
+    (define -paused? #f)
     ;; Calling remainder here probably isn't necessary, because
     ;; -current-frame-start-time should be kept up to date by the -playback-thread below.
     ;; However, it's possible that this function gets called more than one full
     ;; frame-length after -current-frame-start-time, if -playback-thread has not had
     ;; the chance to advance to the next frame yet
-    (define/public (time-within-frame time)      
-      (remainder (- time -current-frame-start-time) -frame-length))
+    (define/public (time-within-frame time)
+      (if -paused?
+          -pause-time-within-frame
+          (remainder (- time -current-frame-start-time) -frame-length)))
     (define -playback-thread
       (thread (lambda ()
                 (printf "Loop-player: Loop thread started. Frame length: ~a\n" -frame-length)
@@ -201,18 +232,25 @@ Summary:
       -frame-length)
     (define/public (is-playing?)
       (thread-running? -playback-thread))
+    ;; TODO It would be nice to use fewer variables to record this paused/unpaused state.
+    ;; It should be thread safe w.r.t. the drawing thread, due to the order in which
+    ;; things are modified, but that's a slippery slope...
     (define/public (pause)
-      (thread-suspend -playback-thread)
-      (set! -pause-time-within-frame (time-within-frame (current-milliseconds)))
-      (set! -current-frame-start-time #f)
-      (printf "Loop-player: Paused\n"))
+      (when (not -paused?)
+        (thread-suspend -playback-thread)
+        (set! -pause-time-within-frame (time-within-frame (current-milliseconds)))
+        (set! -current-frame-start-time #f)
+        (set! -paused? #t)
+        (printf "Loop-player: Paused\n")))
     (define/public (unpause)
-      (set! -current-frame-start-time (- (current-milliseconds) -pause-time-within-frame))
-      (set! -pause-time-within-frame #f)
-      (thread-resume -playback-thread)
-      (printf "Loop-player: Unpaused\n"))))
+      (when -paused?
+        (set! -current-frame-start-time (- (current-milliseconds) -pause-time-within-frame))
+        (set! -pause-time-within-frame #f)
+        (thread-resume -playback-thread)
+        (set! -paused? #f)
+        (printf "Loop-player: Unpaused\n")))))
 
 (define the-loop-player
   (new loop-player%
        [initial-frame-start-time (current-milliseconds)]
-       [frame-length 4800]))
+       [frame-length 2400]))

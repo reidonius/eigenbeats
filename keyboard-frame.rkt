@@ -29,14 +29,12 @@
   (new recording-instrument-controller%
        [instrument instrument]
        [key-to-event-map key-to-event-map]
+       [name name]
        [parent instrument-controller-panel]
        [min-width 400]
        [min-height 50]
        [stretchable-width #t]
-       [stretchable-height #t]
-       [paint-callback
-        (lambda (canvas dc)
-          (send dc draw-text name 0 0))]))
+       [stretchable-height #t]))
 
 (define instrument-controller-panel
   (new vertical-panel%
@@ -135,26 +133,41 @@
         [#\l  . (crash-cymbal)]
         [#\;  . (snare)]))
 
-(add-recording-instrument-controller (new $synth)
-                                     note-keymap
-                                     "$synth")
+(define controller1
+  (add-recording-instrument-controller (new $synth)
+                                       note-keymap
+                                       "SYNTH"))
 
-(add-recording-instrument-controller (new $bloop)
-                                     note-keymap
-                                     "$bloop")
+(define controller2
+  (add-recording-instrument-controller (new $bloop)
+                                       note-keymap
+                                       "BLOOP"))
 
-(add-recording-instrument-controller (new $major-chords)
-                                     note-keymap
-                                     "$major-chords")
 
-(add-recording-instrument-controller (new $chords)
-                                     chord-keymap
-                                     "$chords")
+(define controller3
+  (add-recording-instrument-controller (new $major-chords)
+                                       note-keymap
+                                       "MAJOR CHORDS"))
 
-(add-recording-instrument-controller (new $wobble)
-                                     wobble-keymap
-                                     "$wobble")
+(define controller4
+  (add-recording-instrument-controller (new $chords)
+                                       chord-keymap
+                                       "CHORDS"))
 
-(add-recording-instrument-controller (new $drums)
-                                     drum-keymap
-                                     "$drums")
+(define controller5
+  (add-recording-instrument-controller (new $wobble)
+                                       wobble-keymap
+                                       "WOBBLE"))
+
+(define controller6
+  (add-recording-instrument-controller (new $drums)
+                                       drum-keymap
+                                       "DRUMS"))
+
+(define my-draw-thread
+  (thread (λ ()
+            (let loop ()
+              (for ([c (list controller1 controller2 controller3 controller4 controller5 controller6)])
+                  (send c refresh))
+              (sleep .02)
+              (loop)))))

@@ -80,10 +80,11 @@ Summary:
     ;;   'dub       Notes are "recorded" and played back again at the
     ;;              same time through the loop
     (define -name name)
+    (define -id name)
     (define -state 'free)
     (define -align-new-events? #t)
     (define -recorded-events '())
-    (define -num-ticks 16)
+    (define -num-ticks 8)
     (define -loop-player the-loop-player)
     (define (-record-event time instrument command align?)
       (let* ([event-time (if align?
@@ -95,44 +96,37 @@ Summary:
              [new-event (list event-time event-id instrument command)]
              [new-recorded-events (eventlist-insert -recorded-events new-event)])
         (set! -recorded-events new-recorded-events)
-        (send -loop-player update-eventlist -recorded-events)
-        (printf "Recording-controller: Added event ~a at time ~a\n" event-id event-time)))
+        (send -loop-player update-eventlist -id -recorded-events)))
     (define (-remove-last-recorded-event)
       (when (not (empty? -recorded-events))
         (let ([id-to-remove (length -recorded-events)])
           (set! -recorded-events (eventlist-remove -recorded-events id-to-remove))
-          (send -loop-player update-eventlist -recorded-events)
-          (printf "Recording-controller: Removed event ~a\n" id-to-remove))))
+          (send -loop-player update-eventlist -id -recorded-events))))
     (define/override (on-char ke)
       (let ([k (send ke get-key-code)])
         (match (list k -state)
           ;; Some key events below trigger state transitions in this controller
           [(list #\\ 'free)
            (begin (set! -state 'dub)
-                  (set-canvas-background lightred)
-                  (printf "Recording-controller: Recording is ON\n"))]
+                  (set-canvas-background lightred))]
           [(list #\\ 'dub)
            (begin (set! -state 'free)
-                  (set-canvas-background lightgreen)
-                  (printf "Recording-controller: Recording is OFF\n"))]
+                  (set-canvas-background lightgreen))]
           [(list #\space _)
            (if (send -loop-player is-playing?)
                (send -loop-player pause)
                (send -loop-player unpause))]
           ;; ..Others modify properties of the controller
           [(list #\x _)
-           (begin (set! -align-new-events? (not -align-new-events?))
-                  (printf "Recording-controller: Alignment ~a\n" (if -align-new-events? "ON" "OFF")))]
+           (begin (set! -align-new-events? (not -align-new-events?)))]
           [(list #\< _)
-           (begin (if (> -num-ticks 1)
-                      (set! -num-ticks (sub1 -num-ticks))
-                      (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks)))]
+           (begin (when (> -num-ticks 1)
+                    (set! -num-ticks (sub1 -num-ticks))))]
           [(list #\> _)
-           (begin (set! -num-ticks (add1 -num-ticks))
-                  (printf "Recording-controller: # ticks for alignment: ~a\n" -num-ticks))]
+           (begin (set! -num-ticks (add1 -num-ticks)))]
           [(list #\backspace 'dub)
            (begin (-remove-last-recorded-event)
-                  (send -loop-player update-eventlist -recorded-events))]
+                  (send -loop-player update-eventlist -id -recorded-events))]
           ;; ..The rest are forwarded to the superclass, but if in the 'dub state,
           ;;   we "record" them by
           ;;    * Asking the superclass if this is a meaningful key event (i.e. does it trigger an instrument event)
@@ -142,7 +136,7 @@ Summary:
                   (when (and (eq? -state 'dub)
                              (list? (key->event k)))
                     (-record-event (current-milliseconds) (get-instrument) (key->event k) -align-new-events?)
-                    (send -loop-player update-eventlist -recorded-events)))])))
+                    (send -loop-player update-eventlist -id -recorded-events)))])))
     (define/override (on-focus on?)
       (if on?
           (if (eq? -state 'dub)
@@ -154,14 +148,15 @@ Summary:
     ;; on a differt buffer, only re-drawing it when it needs to?
     (define/private (my-paint-callback canvas dc)
       ;; Draw the name
-      (send dc draw-text -name 0 0)
-      ;; Draw the "ticks"
+      (send dc draw-text (format "~a [Auto-align ~a]" -name (if -align-new-events? "ON" "OFF")) 0 0)
+      ;; Draw the "ticks" and event line
       (let ([tick-x-positions (map (λ (k) (/ (* k (get-width)) -num-ticks)) (range (add1 -num-ticks)))]
-            [y-top (* (get-height) 1/4)]
-            [y-bot (* (get-height) 3/4)])
-        (send dc set-pen "black" 1 'solid)
+            [y-top (* (get-height) 1/3)]
+            [y-bot (* (get-height) 2/3)])
+        (send dc set-pen "gray" 2 'solid)
         (for ([x tick-x-positions])
-          (send dc draw-line x y-top x y-bot)))
+          (send dc draw-line x y-top x y-bot))
+        (send dc draw-line 0 (* (get-height) 1/2) (get-width) (* (get-height) 1/2)))
       ;; Draw the recorded events
       (let* ([get-event-x-position (λ (event) (/ (* (get-width) (first event)) (send -loop-player get-frame-length)))]
              [event-x-positions (map get-event-x-position -recorded-events)])
@@ -184,9 +179,11 @@ Summary:
     (init frame-length)
     (define -current-frame-start-time initial-frame-start-time)
     (define -frame-length frame-length)
-    (define -looped-events '())
+    (define -looped-events-hash (`hash))
     (define -pause-time-within-frame #f)
     (define -paused? #f)
+    (define (-flatten-all-looped-events)
+      (sort (append* (hash-values -looped-events-hash)) < #:key car))
     ;; Calling remainder here probably isn't necessary, because
     ;; -current-frame-start-time should be kept up to date by the -playback-thread below.
     ;; However, it's possible that this function gets called more than one full
@@ -202,7 +199,7 @@ Summary:
                 ;; The main loop - traverses the list of looped events, playing each one
                 ;; at the appropriate time, and jumping back to the start of the list when
                 ;; we get to a new frame
-                (let play-pending ([pending -looped-events])
+                (let play-pending ([pending (-flatten-all-looped-events)])
                   (let* ([time-within-current-frame (- (current-milliseconds) -current-frame-start-time)]
                          [advance-frame? (> time-within-current-frame -frame-length)]
                          [play-event-now? (λ (event) (< (car event) time-within-current-frame))])
@@ -211,7 +208,7 @@ Summary:
                             (begin
                               (set! -current-frame-start-time (+ -current-frame-start-time -frame-length))
                               (sleep .01)
-                              (play-pending -looped-events))
+                              (play-pending (-flatten-all-looped-events)))
                             (begin
                               (sleep .01)
                               (play-pending pending)))
@@ -224,8 +221,8 @@ Summary:
                               (begin
                                 (sleep .01)
                                 (play-pending pending))))))))))
-    (define/public (update-eventlist new-eventlist)
-      (set! -looped-events new-eventlist))
+    (define/public (update-eventlist id new-eventlist)
+      (set! -looped-events-hash (hash-set -looped-events-hash id new-eventlist)))
     (define/public (normalized-frame-position)
       (/ (time-within-frame (current-milliseconds)) (exact->inexact -frame-length)))
     (define/public (get-frame-length)
@@ -240,15 +237,13 @@ Summary:
         (thread-suspend -playback-thread)
         (set! -pause-time-within-frame (time-within-frame (current-milliseconds)))
         (set! -current-frame-start-time #f)
-        (set! -paused? #t)
-        (printf "Loop-player: Paused\n")))
+        (set! -paused? #t)))
     (define/public (unpause)
       (when -paused?
         (set! -current-frame-start-time (- (current-milliseconds) -pause-time-within-frame))
         (set! -pause-time-within-frame #f)
         (thread-resume -playback-thread)
-        (set! -paused? #f)
-        (printf "Loop-player: Unpaused\n")))))
+        (set! -paused? #f)))))
 
 (define the-loop-player
   (new loop-player%

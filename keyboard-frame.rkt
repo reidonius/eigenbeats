@@ -32,7 +32,7 @@
        [name name]
        [parent instrument-controller-panel]
        [min-width 400]
-       [min-height 50]
+       [min-height 60]
        [stretchable-width #t]
        [stretchable-height #t]))
 
@@ -136,7 +136,7 @@
 (define controller1
   (add-recording-instrument-controller (new $synth)
                                        note-keymap
-                                       "SYNTH"))
+                                       "NOTE"))
 
 (define controller2
   (add-recording-instrument-controller (new $bloop)
@@ -144,12 +144,12 @@
                                        "BLOOP"))
 
 
-(define controller3
+#;(define controller3
   (add-recording-instrument-controller (new $major-chords)
                                        note-keymap
                                        "MAJOR CHORDS"))
 
-(define controller4
+#;(define controller4
   (add-recording-instrument-controller (new $chords)
                                        chord-keymap
                                        "CHORDS"))
@@ -167,7 +167,7 @@
 (define my-draw-thread
   (thread (λ ()
             (let loop ()
-              (for ([c (list controller1 controller2 controller3 controller4 controller5 controller6)])
+              (for ([c (list controller1 controller2 controller5 controller6)])
                   (send c refresh))
               (sleep .02)
               (loop)))))

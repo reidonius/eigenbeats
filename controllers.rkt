@@ -179,7 +179,7 @@ Summary:
     (init frame-length)
     (define -current-frame-start-time initial-frame-start-time)
     (define -frame-length frame-length)
-    (define -looped-events-hash (`hash))
+    (define -looped-events-hash (hash))
     (define -pause-time-within-frame #f)
     (define -paused? #f)
     (define (-flatten-all-looped-events)
